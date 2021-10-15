@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "bpf_helpers.h": "c",
+        "vmlinux.h": "c",
+        "flowmon.h": "c"
+    }
+}

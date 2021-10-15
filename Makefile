@@ -15,6 +15,9 @@ ARCH := $(shell uname -m | sed 's/x86_64/x86/')
 
 APPS = flowmon
 
+COMMON_OBJ = \
+	$(OUTPUT)/uprobe_helpers.o
+
 # Get Clang's default includes on this system. We'll explicitly add these dirs
 # to the includes list when compiling with `-target bpf` because otherwise some
 # architecture-specific dirs will be "missing" on some architectures/distros -
@@ -46,44 +49,52 @@ clean:
 	$(call msg,CLEAN)
 	$(Q)rm -rf $(OUTPUT) $(APPS)
 
+# Create output folders
 $(OUTPUT) $(OUTPUT)/libbpf:
 	$(call msg,MKDIR,$@)
 	$(Q)mkdir -p $@
+
+# build all apps
+$(APPS): %: $(OUTPUT)/%.o $(COMMON_OBJ) $(LIBBPF_OBJ) | $(OUTPUT)
+	$(call msg,BINARY,$@)
+	$(Q)$(CC) $(CFLAGS) $^ $(LDFLAGS) -lelf -lz -o $@
+
+# Each app's main object file depends on the corresponding skeleton
+$(patsubst %,$(OUTPUT)/%.o,$(APPS)): %.o: %.skel.h
+
+# Build object files for c sources
+$(OUTPUT)/%.o: src/%.c $(wildcard src/%.h) | $(OUTPUT)
+	$(call msg,CC,$@)
+	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $(filter %.c,$^) -o $@
+
+# Build object files for c++ sources
+$(OUTPUT)/%.o: src/%.cc $(wildcard src/%.h) | $(OUTPUT)
+	$(call msg,CC,$@)
+	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $(filter %.cc,$^) -o $@
+
+# Generate BPF skeleton files
+$(OUTPUT)/%.skel.h: $(OUTPUT)/%.bpf.o | $(OUTPUT)
+	$(call msg,GEN-SKEL,$@)
+	$(Q)$(BPFTOOL) gen skeleton $< > $@
+
+# Compile BPF programs
+$(OUTPUT)/%.bpf.o: src/%.bpf.c $(LIBBPF_OBJ) $(wildcard src/%.h) $(VMLINUX) | $(OUTPUT)
+	$(call msg,BPF,$@)
+	$(Q)$(CLANG) \
+		-g -O2 -target bpf \
+		-D__TARGET_ARCH_$(ARCH) \
+		$(INCLUDES) $(CLANG_BPF_SYS_INCLUDES) \
+		-c $(filter %.c,$^) \
+		-o $@
+	$(Q)$(LLVM_STRIP) -g $@ # strip useless DWARF info
 
 # Build libbpf
 $(LIBBPF_OBJ): $(wildcard $(LIBBPF_SRC)/*.[ch] $(LIBBPF_SRC)/Makefile) | $(OUTPUT)/libbpf
 	$(call msg,LIB,$@)
 	$(Q)$(MAKE) -C $(LIBBPF_SRC) BUILD_STATIC_ONLY=1		      \
 		    OBJDIR=$(dir $@)/libbpf DESTDIR=$(dir $@)		      \
-		    INCLUDEDIR= LIBDIR= UAPIDIR=			      \
+		    INCLUDEDIR= LIBDIR= UAPIDIR=			               \
 		    install
-
-# Build BPF code
-$(OUTPUT)/%.bpf.o: src/%.bpf.c $(LIBBPF_OBJ) $(wildcard %.h) $(VMLINUX) | $(OUTPUT)
-	$(call msg,BPF,$@)
-	$(Q)$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) $(INCLUDES) $(CLANG_BPF_SYS_INCLUDES) -c $(filter %.c,$^) -o $@
-	$(Q)$(LLVM_STRIP) -g $@ # strip useless DWARF info
-
-# Generate BPF skeletons
-$(OUTPUT)/%.skel.h: $(OUTPUT)/%.bpf.o | $(OUTPUT)
-	$(call msg,GEN-SKEL,$@)
-	$(Q)$(BPFTOOL) gen skeleton $< > $@
-
-# Build user-space code
-$(patsubst %,$(OUTPUT)/%.o,$(APPS)): %.o: %.skel.h
-
-$(OUTPUT)/%.o: src/%.c $(wildcard src/%.h) | $(OUTPUT)
-	$(call msg,CC,$@)
-	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $(filter %.c,$^) -o $@
-
-$(OUTPUT)/%.o: src/%.cc $(wildcard src/%.h) | $(OUTPUT)
-	$(call msg,CC,$@)
-	$(Q)$(CC) $(CFLAGS) $(INCLUDES) -c $(filter %.cc,$^) -o $@
-
-# Build application binary
-$(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) | $(OUTPUT)
-	$(call msg,BINARY,$@)
-	$(Q)$(CC) $(CFLAGS) $^ -lelf -lz -o $@
 
 # delete failed targets
 .DELETE_ON_ERROR:
